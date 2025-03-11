@@ -5,9 +5,9 @@ import time
 # Initialize Pygame
 pygame.init()
 
-# Window settings
-WIDTH = 900
-HEIGHT = 700
+# Window settings – increased size for more space between nodes
+WIDTH = 1200
+HEIGHT = 800
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("TCMS with Train Movement Animation")
 
@@ -19,6 +19,7 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 GRAY = (200, 200, 200)
 YELLOW = (255, 255, 0)
+PURPLE = (128, 0, 128)  # Color for control node
 
 # Train parameters
 CRUISING_SPEED = 80  # km/h
@@ -32,9 +33,6 @@ STATION_DISTANCE = 300  # Pixels between stations
 # MVB parameters
 TRANSMISSION_TIME = 0.5  # Seconds
 SENSOR_INTERVAL = 1.0    # Seconds
-
-# Node positions
-NODE_POSITIONS = [100, 200, 300, 400, 500, 600, 700, 800]
 
 # Button definitions
 BUTTONS = {
@@ -59,9 +57,7 @@ class Train:
         self.at_station = False
 
     def update(self, delta_time):
-        # Simulate wind resistance
         wind_effect = random.uniform(-0.01, 0.01)
-        
         if self.emergency_stop:
             self.speed = max(0, self.speed - EMERGENCY_DECEL)
             self.target_speed = 0
@@ -71,20 +67,15 @@ class Train:
             self.speed = min(self.target_speed, self.speed + ACCELERATION + wind_effect)
         else:
             self.speed = max(0, self.speed - 0.01 + wind_effect)
-
-        # Update distance traveled
         self.distance_traveled += self.speed * delta_time * 0.5  # Scale for visibility
         self.distance_traveled %= STATION_DISTANCE * 3  # Loop every 3 stations
 
-        # Snapping logic when the train stops
-        stopping_points = [0, 220, 525]  # Stopping points for stations 2, 3, 1
+        stopping_points = [0, 220, 525]
         if self.speed == 0:
             for s in stopping_points:
-                if abs(self.distance_traveled % 900 - s) < 30:  # Tolerance of 30 units
-                    # Snap to the exact stopping point
+                if abs(self.distance_traveled % 900 - s) < 30:
                     self.distance_traveled = s + (self.distance_traveled // 900) * 900
                     break
-        # Check if at station
         self.at_station = any(abs(self.distance_traveled % 900 - s) < 5 for s in stopping_points) and self.speed == 0
 
     def board_passengers(self):
@@ -93,7 +84,7 @@ class Train:
             alighting = random.randint(0, min(10, self.passengers))
             self.passengers = max(0, min(MAX_PASSENGERS, self.passengers + boarding - alighting))
 
-# MVB Bus class
+# MVB Bus class – updated to use node.x for transmissions
 class MVB_Bus:
     def __init__(self):
         self.transmissions = []
@@ -109,34 +100,38 @@ class MVB_Bus:
                 self.transmissions.remove(t)
 
     def draw(self):
-        pygame.draw.line(screen, BLACK, (50, 500), (850, 500), 5)
+        # Draw bus line along the bottom of the nodes
+        bus_start = 50
+        bus_end = WIDTH - 50
+        bus_y = 500
+        pygame.draw.line(screen, BLACK, (bus_start, bus_y), (bus_end, bus_y), 5)
         font = pygame.font.SysFont(None, 20)
         for t in self.transmissions:
-            start_x = NODE_POSITIONS[t['sender'].index]
-            end_x = NODE_POSITIONS[t['receiver'].index]
+            start_x = t['sender'].x
+            end_x = t['receiver'].x
             current_x = start_x + (end_x - start_x) * t['progress']
-            pygame.draw.circle(screen, RED, (int(current_x), 500), 5)
+            pygame.draw.circle(screen, RED, (int(current_x), bus_y), 5)
             label = font.render(t['message'], True, BLACK)
-            screen.blit(label, (current_x - 20, 480))
+            screen.blit(label, (current_x - 20, bus_y - 20))
 
-# Base Node class
+# Base Node class – now each node gets its own x coordinate so it touches the bus
 class Node:
-    def __init__(self, name, index):
+    def __init__(self, name):
         self.name = name
-        self.index = index
+        self.x = 0  # Will be assigned later
 
     def draw(self):
-        x = NODE_POSITIONS[self.index]
-        pygame.draw.circle(screen, BLUE, (x, 450), 20)
-        pygame.draw.line(screen, BLACK, (x, 450), (x, 500), 2)
+        # Nodes are drawn with their bottom touching the bus line at y=500
+        node_y = 450
+        pygame.draw.circle(screen, BLUE, (int(self.x), node_y), 20)
+        pygame.draw.line(screen, BLACK, (int(self.x), node_y), (int(self.x), node_y + 50), 2)
         font = pygame.font.SysFont(None, 24)
-        label = font.render(self.name, True, BLACK)
-        screen.blit(label, (x - 40, 420))
+        screen.blit(font.render(self.name, True, BLACK), (int(self.x) - 40, node_y - 30))
 
-# Sensor Node
+# Sensor Node (inherits from Node)
 class SensorNode(Node):
-    def __init__(self, name, index, read_state_func, interval=SENSOR_INTERVAL):
-        super().__init__(name, index)
+    def __init__(self, name, read_state_func, interval=SENSOR_INTERVAL):
+        super().__init__(name)
         self.read_state_func = read_state_func
         self.interval = interval
         self.last_send_time = 0
@@ -146,19 +141,19 @@ class SensorNode(Node):
             bus.send_message(self, receiver, self.read_state_func())
             self.last_send_time = current_time
 
-# Actuator Node
+# Actuator Node (inherits from Node)
 class ActuatorNode(Node):
-    def __init__(self, name, index, set_state_func):
-        super().__init__(name, index)
+    def __init__(self, name, set_state_func):
+        super().__init__(name)
         self.set_state_func = set_state_func
 
     def receive_message(self, message):
         self.set_state_func(message)
 
-# Control Unit Node
+# Control Unit Node (inherits from Node) with different drawing color
 class ControlUnitNode(Node):
-    def __init__(self, name, index):
-        super().__init__(name, index)
+    def __init__(self, name):
+        super().__init__(name)
         self.current_speed = 0.0
         self.door_states = [False] * NUM_DOORS
         self.brakes_applied = False
@@ -223,6 +218,14 @@ class ControlUnitNode(Node):
         if self.display_message:
             screen.blit(font.render(self.display_message, True, RED), (50, 230))
 
+    def draw(self):
+        # Draw the control node with a different color (purple) 
+        node_y = 450
+        pygame.draw.circle(screen, PURPLE, (int(self.x), node_y), 20)
+        pygame.draw.line(screen, BLACK, (int(self.x), node_y), (int(self.x), node_y + 50), 2)
+        font = pygame.font.SysFont(None, 24)
+        screen.blit(font.render(self.name, True, BLACK), (int(self.x) - 40, node_y - 30))
+
 # Main simulation function
 def simulate_tcms():
     global traction_actuator, brake_actuator, emergency_actuator, door_actuators
@@ -231,56 +234,57 @@ def simulate_tcms():
     bus = MVB_Bus()
 
     # Create nodes
-    speed_sensor = SensorNode("Speed", 0, lambda: f"Speed: {train.speed:.1f}")
-    door_sensors = [SensorNode(f"Door{i}", i+1, lambda i=i: f"Door{i}: {'Open' if train.doors[i] else 'Closed'}") for i in range(NUM_DOORS)]
-    passenger_sensor = SensorNode("Pass", 5, lambda: f"Passengers: {train.passengers}")
-    station_sensor = SensorNode("Station", 6, lambda: f"Station: {'Yes' if train.at_station else 'No'}")
-    traction_actuator = ActuatorNode("Traction", 7, lambda msg: setattr(train, 'target_speed', float(msg.split(":")[1]) if "Speed" in msg else train.target_speed))
-    brake_actuator = ActuatorNode("Brake", 3, lambda msg: setattr(train, 'brakes_applied', msg == "Apply Brakes"))
-    emergency_actuator = ActuatorNode("Emerg", 4, lambda msg: setattr(train, 'emergency_stop', msg == "Emergency Stop"))
-    door_actuators = [ActuatorNode(f"Door{i}A", i+1, lambda msg, i=i: train.doors.__setitem__(i, "Open" in msg)) for i in range(NUM_DOORS)]
+    speed_sensor = SensorNode("Speed", lambda: f"Speed: {train.speed:.1f}")
+    door_sensors = [SensorNode(f"DoorS{i}", lambda i=i: f"Door{i}: {'Open' if train.doors[i] else 'Closed'}") for i in range(NUM_DOORS)]
+    passenger_sensor = SensorNode("Pass", lambda: f"Passengers: {train.passengers}")
+    station_sensor = SensorNode("Station", lambda: f"Station: {'Yes' if train.at_station else 'No'}")
+    traction_actuator = ActuatorNode("Traction", lambda msg: setattr(train, 'target_speed', float(msg.split(":")[1]) if "Speed" in msg else train.target_speed))
+    brake_actuator = ActuatorNode("Brake", lambda msg: setattr(train, 'brakes_applied', msg == "Apply Brakes"))
+    emergency_actuator = ActuatorNode("Emerg", lambda msg: setattr(train, 'emergency_stop', msg == "Emergency Stop"))
+    door_actuators = [ActuatorNode(f"DoorA{i}", lambda msg, i=i: train.doors.__setitem__(i, "Open" in msg)) for i in range(NUM_DOORS)]
+    control_unit = ControlUnitNode("Control")
 
-    control_unit = ControlUnitNode("Control", 2)
-    nodes = [speed_sensor, *door_sensors, passenger_sensor, station_sensor, traction_actuator, brake_actuator, emergency_actuator, *door_actuators, control_unit]
+    # Build the list of nodes in the order they will appear on the bus.
+    nodes = [speed_sensor] + door_sensors + [passenger_sensor, station_sensor, traction_actuator, brake_actuator, emergency_actuator] + door_actuators + [control_unit]
+
+    # Assign unique x positions along the bus line with extra space between nodes.
+    bus_start = 50
+    bus_end = WIDTH - 50  # 1150 in a 1200-wide window
+    spacing = (bus_end - bus_start) / (len(nodes) - 1)
+    for i, node in enumerate(nodes):
+        node.x = bus_start + i * spacing
 
     clock = pygame.time.Clock()
     running = True
     message_timer = 0
     previous_at_station = False
+    font = pygame.font.SysFont(None, 24)
 
     while running:
-        # Inside the main loop, after updating train state (e.g., train.update(delta_time))
-        
         if not train.at_station:
-            # Define target stopping points (where train_x aligns middle with station)
-            stopping_points = [200, 500, 800]  # Adjusted for stations at 300, 600, 0
+            stopping_points = [200, 500, 800]
             d = train.distance_traveled % 900
             distances = [(s - d) % 900 for s in stopping_points]
             distance_to_next_stop = min([dist for dist in distances if dist > 0])
-
-            # Calculate stopping distance based on current speed
             u = train.speed
             s = 0
             speed = u
             while speed > 0:
-                speed = max(0, speed - DECELERATION)  # DECELERATION = 0.2 km/h per frame
-                s += speed * (1 / 60) * 0.5  # Distance per frame (60 FPS)
-
-            # Apply brakes if within stopping distance
+                speed = max(0, speed - DECELERATION)
+                s += speed * (1 / 60) * 0.5
             if distance_to_next_stop <= s and not control_unit.brakes_applied:
                 bus.send_message(control_unit, brake_actuator, "Apply Brakes")
                 control_unit.brakes_applied = True
                 control_unit.display_message = "Automatic braking applied"
         else:
-            # Release brakes when stopped at station
             if control_unit.brakes_applied:
                 bus.send_message(control_unit, brake_actuator, "Release Brakes")
                 control_unit.brakes_applied = False
                 control_unit.display_message = "Brakes released at station"
-        delta_time = clock.tick(60) / 1000.0  # Seconds
+
+        delta_time = clock.tick(60) / 1000.0
         current_time = pygame.time.get_ticks() / 1000.0
 
-        # Handle events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -289,79 +293,52 @@ def simulate_tcms():
                 for name, rect in BUTTONS.items():
                     if rect.collidepoint(pos):
                         control_unit.on_button_click(name, bus, train)
-                        message_timer = current_time + 2  # Show message for 2 seconds
+                        message_timer = current_time + 2
 
         # Update sensors
         speed_sensor.update(current_time, bus, control_unit)
-        for door_sensor in door_sensors:
-            door_sensor.update(current_time, bus, control_unit)
+        for sensor in door_sensors:
+            sensor.update(current_time, bus, control_unit)
         passenger_sensor.update(current_time, bus, control_unit)
-        print(train.at_station)
         station_sensor.update(current_time, bus, control_unit)
 
-        # Update MVB bus
         bus.update(delta_time)
-
-        # Update train state
         train.update(delta_time)
-        print(f"Speed: {train.speed}, Position: {train.distance_traveled % 900}, At Station: {train.at_station}")
         if train.at_station and not previous_at_station and train.speed < 1:
-        # Automatically open doors after stopping at station
             for i in range(NUM_DOORS):
                 bus.send_message(control_unit, door_actuators[i], f"Open Door{i}")
             control_unit.display_message = "Doors automatically opening at station"
         if train.at_station:
             train.board_passengers()
-        # Update the previous state for the next loop iteration
         previous_at_station = train.at_station
 
-        # Clear display message after timeout
         if current_time > message_timer and control_unit.display_message:
             control_unit.display_message = ""
 
-        # Calculate train's x-position
         train_x = 50 + (train.distance_traveled % 900)
 
-        # Clear screen
         screen.fill(WHITE)
-
-        # Draw track
-        pygame.draw.line(screen, BLACK, (0, 600), (900, 600), 5)
-
-        # Draw stations
+        pygame.draw.line(screen, BLACK, (50, 600), (WIDTH - 50, 600), 5)
         for i in range(3):
             station_x = 50 + i * 300
             color = YELLOW if train.at_station and abs(train_x - station_x) < 10 else GRAY
             pygame.draw.rect(screen, color, (station_x - 10, 590, 20, 20))
-            font = pygame.font.SysFont(None, 20)
             screen.blit(font.render(f"Station {i+1}", True, BLACK), (station_x - 20, 610))
-
-        # Draw train
         pygame.draw.rect(screen, BLACK, (train_x, 550, 200, 50))
-
-        # Draw doors
-        door_positions = [train_x + 20 + i*45 for i in range(4)]
+        door_positions = [train_x + 20 + i * 45 for i in range(4)]
         for i, pos in enumerate(door_positions):
             color = RED if train.doors[i] else GREEN
             pygame.draw.rect(screen, color, (pos, 550, 30, 50))
+        screen.blit(font.render(f"{train.speed:.1f} km/h", True, BLACK), (train_x + 50, 520))
 
-        # Draw speed label
-        speed_label = font.render(f"{train.speed:.1f} km/h", True, BLACK)
-        screen.blit(speed_label, (train_x + 50, 520))
-
-        # Draw MVB bus and nodes
         bus.draw()
         for node in nodes:
             node.draw()
-
-        # Draw driver interface
         control_unit.draw_interface()
 
-        # Update display
         pygame.display.flip()
 
     pygame.quit()
 
-# Run the simulation
 if __name__ == "__main__":
     simulate_tcms()
