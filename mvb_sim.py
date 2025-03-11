@@ -73,11 +73,19 @@ class Train:
             self.speed = max(0, self.speed - 0.01 + wind_effect)
 
         # Update distance traveled
-        self.distance_traveled += self.speed * delta_time * 10  # Scale for visibility
+        self.distance_traveled += self.speed * delta_time * 0.5  # Scale for visibility
         self.distance_traveled %= STATION_DISTANCE * 3  # Loop every 3 stations
 
+        # Snapping logic when the train stops
+        stopping_points = [0, 220, 525]  # Stopping points for stations 2, 3, 1
+        if self.speed == 0:
+            for s in stopping_points:
+                if abs(self.distance_traveled % 900 - s) < 30:  # Tolerance of 30 units
+                    # Snap to the exact stopping point
+                    self.distance_traveled = s + (self.distance_traveled // 900) * 900
+                    break
         # Check if at station
-        self.at_station = abs(self.distance_traveled % STATION_DISTANCE) < 5 and self.speed < 1
+        self.at_station = any(abs(self.distance_traveled % 900 - s) < 5 for s in stopping_points) and self.speed == 0
 
     def board_passengers(self):
         if self.at_station and any(self.doors):
@@ -238,8 +246,37 @@ def simulate_tcms():
     clock = pygame.time.Clock()
     running = True
     message_timer = 0
+    previous_at_station = False
 
     while running:
+        # Inside the main loop, after updating train state (e.g., train.update(delta_time))
+        
+        if not train.at_station:
+            # Define target stopping points (where train_x aligns middle with station)
+            stopping_points = [200, 500, 800]  # Adjusted for stations at 300, 600, 0
+            d = train.distance_traveled % 900
+            distances = [(s - d) % 900 for s in stopping_points]
+            distance_to_next_stop = min([dist for dist in distances if dist > 0])
+
+            # Calculate stopping distance based on current speed
+            u = train.speed
+            s = 0
+            speed = u
+            while speed > 0:
+                speed = max(0, speed - DECELERATION)  # DECELERATION = 0.2 km/h per frame
+                s += speed * (1 / 60) * 0.5  # Distance per frame (60 FPS)
+
+            # Apply brakes if within stopping distance
+            if distance_to_next_stop <= s and not control_unit.brakes_applied:
+                bus.send_message(control_unit, brake_actuator, "Apply Brakes")
+                control_unit.brakes_applied = True
+                control_unit.display_message = "Automatic braking applied"
+        else:
+            # Release brakes when stopped at station
+            if control_unit.brakes_applied:
+                bus.send_message(control_unit, brake_actuator, "Release Brakes")
+                control_unit.brakes_applied = False
+                control_unit.display_message = "Brakes released at station"
         delta_time = clock.tick(60) / 1000.0  # Seconds
         current_time = pygame.time.get_ticks() / 1000.0
 
@@ -259,6 +296,7 @@ def simulate_tcms():
         for door_sensor in door_sensors:
             door_sensor.update(current_time, bus, control_unit)
         passenger_sensor.update(current_time, bus, control_unit)
+        print(train.at_station)
         station_sensor.update(current_time, bus, control_unit)
 
         # Update MVB bus
@@ -266,8 +304,16 @@ def simulate_tcms():
 
         # Update train state
         train.update(delta_time)
+        print(f"Speed: {train.speed}, Position: {train.distance_traveled % 900}, At Station: {train.at_station}")
+        if train.at_station and not previous_at_station and train.speed < 1:
+        # Automatically open doors after stopping at station
+            for i in range(NUM_DOORS):
+                bus.send_message(control_unit, door_actuators[i], f"Open Door{i}")
+            control_unit.display_message = "Doors automatically opening at station"
         if train.at_station:
             train.board_passengers()
+        # Update the previous state for the next loop iteration
+        previous_at_station = train.at_station
 
         # Clear display message after timeout
         if current_time > message_timer and control_unit.display_message:
@@ -319,4 +365,3 @@ def simulate_tcms():
 # Run the simulation
 if __name__ == "__main__":
     simulate_tcms()
-    
