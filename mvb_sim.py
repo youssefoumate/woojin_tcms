@@ -9,7 +9,8 @@ import json
 # -----------------------------
 # Network MVB Bus Implementation
 # -----------------------------
-PACKET_LOSS_PROB = 0.1
+# Reduced packet loss probability to improve reliability
+PACKET_LOSS_PROB = 0.05
 MIN_DELAY = 0.1
 MAX_DELAY = 0.5
 
@@ -51,10 +52,18 @@ class NetworkMVB_Bus:
             "real_target": effective_target,  # intended recipient in our simulation
             "message": message
         }
+        
+        # Fixed: Store local copy of message for immediate feedback - important for reliability
+        if sender != "Speed" and sender != "Station" and sender != "Pass":  # Ignore status messages for local caching
+            # Add command message to local processing queue to ensure it gets processed even if network fails
+            local_data = data.copy()
+            received_messages.append(local_data)
+            
         # Simulate local packet loss.
         if random.random() < PACKET_LOSS_PROB:
             print(f"[Network Bus] Packet lost locally: {data}")
             return
+            
         # Simulate network delay.
         delay = random.uniform(MIN_DELAY, MAX_DELAY)
         print(f"[Network Bus] Delaying packet {data} by {delay:.2f} sec.")
@@ -193,9 +202,13 @@ class Train:
         self.passengers = 0
         self.distance_traveled = 0  
         self.at_station = False
-
-    def update(self, delta_time):
+        # Track the last time we tried stopping at a station
+        self.last_station_stop_time = 0
+        
+    def update(self, delta_time, current_time):
+        # Handle speed calculation
         wind_effect = random.uniform(-0.01, 0.01)
+        
         if self.emergency_stop:
             self.speed = max(0, self.speed - EMERGENCY_DECEL)
             self.target_speed = 0
@@ -205,16 +218,44 @@ class Train:
             self.speed = min(self.target_speed, self.speed + ACCELERATION + wind_effect)
         else:
             self.speed = max(0, self.speed - 0.01 + wind_effect)
-        self.distance_traveled += self.speed * delta_time * 0.5  
-        self.distance_traveled %= STATION_DISTANCE * 3  
-
+        
+        # Update position based on speed
+        old_distance = self.distance_traveled
+        distance_change = self.speed * delta_time * 0.5
+        self.distance_traveled += distance_change
+        
+        # Print detailed debug info
+        print(f"DEBUG: Speed={self.speed:.2f}, Distance={self.distance_traveled:.2f}, Change={distance_change:.4f}")
+        
+        # Reset position logic - only snap to station when stopped
         stopping_points = [0, 220, 525]
-        if self.speed == 0:
+        
+        # Track wraparound for visualization only - don't modify self.distance_traveled
+        visualized_distance = self.distance_traveled % (STATION_DISTANCE * 3)
+        
+        # Station detection
+        if self.speed < 0.1:  # Almost stopped
             for s in stopping_points:
-                if abs(self.distance_traveled % 900 - s) < 30:
-                    self.distance_traveled = s + (self.distance_traveled // 900) * 900
-                    break
-        self.at_station = any(abs(self.distance_traveled % 900 - s) < 5 for s in stopping_points) and self.speed == 0
+                station_distance = abs(visualized_distance - s)
+                if station_distance < 30:
+                    print(f"DEBUG: Near station at {s}, distance={station_distance:.2f}")
+                    if self.speed == 0:
+                        # Only adjust position when completely stopped
+                        print(f"DEBUG: Adjusting position to station at {s}")
+                        # DO NOT reset the total distance traveled, just ensure visualization works
+                        mod_900 = self.distance_traveled % 900
+                        offset = (s - mod_900) % 900
+                        if offset > 450:  # Take shortest path
+                            offset -= 900
+                        self.distance_traveled += offset
+                        break
+        
+        # Update station status based on visualized distance
+        self.at_station = False
+        for s in stopping_points:
+            if abs(visualized_distance - s) < 5 and self.speed == 0:
+                self.at_station = True
+                break
 
     def board_passengers(self):
         if self.at_station and any(self.doors):
@@ -242,12 +283,20 @@ class SensorNode(Node):
         self.read_state_func = read_state_func
         self.interval = interval
         self.last_send_time = 0
+        # Cache the last value to avoid unnecessary network traffic
+        self.last_value = None
 
     def update(self, current_time):
         if current_time - self.last_send_time > self.interval:
+            # Get current state from the train
             msg = self.read_state_func()
-            send_network_message(self.name, "Control", msg)
-            print(f"[Sensor {self.name}] Sent message: {msg}")
+            
+            # Only send if the value has changed (reduces network traffic)
+            if msg != self.last_value:
+                send_network_message(self.name, "Control", msg)
+                print(f"[Sensor {self.name}] Sent message: {msg}")
+                self.last_value = msg
+                
             self.last_send_time = current_time
 
 # Actuator Node (inherits from Node)
@@ -255,10 +304,14 @@ class ActuatorNode(Node):
     def __init__(self, name, set_state_func):
         super().__init__(name)
         self.set_state_func = set_state_func
+        # Track last received message for reliability
+        self.last_message = None
 
     def receive_message(self, message):
-        print(f"[Actuator {self.name}] Received message: {message}")
-        self.set_state_func(message)
+        if message != self.last_message:  # Only process if message is new
+            print(f"[Actuator {self.name}] Received message: {message}")
+            self.set_state_func(message)
+            self.last_message = message
 
 # Control Unit Node (inherits from Node) with its own draw for PURPLE color.
 class ControlUnitNode(Node):
@@ -271,6 +324,8 @@ class ControlUnitNode(Node):
         self.passengers = 0
         self.at_station = False
         self.display_message = ""
+        # Keep track of last command sent to avoid duplicate commands
+        self.last_commands = {}
 
     def receive_message(self, message):
         print(f"[Control Unit {self.name}] Received message: {message}")
@@ -283,32 +338,50 @@ class ControlUnitNode(Node):
             self.passengers = int(message.split(":")[1])
         elif "Station:" in message:
             self.at_station = "Yes" in message
+        
+    def send_command(self, target, message):
+        # Check if we've sent this exact command recently to avoid duplicates
+        command_key = f"{target}:{message}"
+        current_time = pygame.time.get_ticks() / 1000.0
+        
+        # Only send if we haven't sent this command in the last second
+        if command_key not in self.last_commands or current_time - self.last_commands[command_key] > 1.0:
+            send_network_message(self.name, target, message)
+            self.last_commands[command_key] = current_time
+            return True
+        return False
 
     def on_button_click(self, button, train):
         if button == "Start Moving":
+            print(f"Debug: Sent target speed command to Traction: {CRUISING_SPEED}")
             if all(not state for state in self.door_states):
-                send_network_message(self.name, "Traction", f"Set Target Speed:{CRUISING_SPEED}")
-                self.display_message = "Train starting..."
+                if self.send_command("Traction", f"Set Target Speed:{CRUISING_SPEED}"):
+                    self.display_message = "Train starting..."
             else:
                 self.display_message = "Cannot start with doors open"
         elif button == "Apply Brakes":
-            send_network_message(self.name, "Brake", "Apply Brakes")
-            self.brakes_applied = True
+            if self.send_command("Brake", "Apply Brakes"):
+                self.brakes_applied = True
+                self.display_message = "Brakes applied"
         elif button == "Release Brakes":
-            send_network_message(self.name, "Brake", "Release Brakes")
-            self.brakes_applied = False
+            if self.send_command("Brake", "Release Brakes"):
+                self.brakes_applied = False
+                self.display_message = "Brakes released"
         elif button == "Open Doors":
-            if self.current_speed == 0:
+            if self.current_speed < 1.0:  # Allow for small float imprecision
                 for i in range(NUM_DOORS):
-                    send_network_message(self.name, f"DoorActuator{i}", f"Open Door{i}")
+                    self.send_command(f"DoorActuator{i}", f"Open Door{i}")
+                self.display_message = "Opening doors"
             else:
                 self.display_message = "Cannot open doors while moving"
         elif button == "Close Doors":
             for i in range(NUM_DOORS):
-                send_network_message(self.name, f"DoorActuator{i}", f"Close Door{i}")
+                self.send_command(f"DoorActuator{i}", f"Close Door{i}")
+            self.display_message = "Closing doors"
         elif button == "Emergency Stop":
-            send_network_message(self.name, "Emerg", "Emergency Stop")
-            self.emergency_stop = True
+            if self.send_command("Emerg", "Emergency Stop"):
+                self.emergency_stop = True
+                self.display_message = "EMERGENCY STOP ACTIVATED"
 
     def draw_interface(self):
         font = pygame.font.SysFont(None, 24)
@@ -343,15 +416,46 @@ def simulate_tcms():
     train = Train()
 
     # Create nodes.
-    speed_sensor    = SensorNode("Speed", lambda: f"Speed:{train.speed:.1f}")
+    speed_sensor    = SensorNode("Speed", lambda: f"Speed:{train.speed:.1f}", interval=0.5)  # More frequent updates
     door_sensors    = [SensorNode(f"DoorSensor{i}", lambda i=i: f"Door{i}:{'Open' if train.doors[i] else 'Closed'}") for i in range(NUM_DOORS)]
     passenger_sensor = SensorNode("Pass", lambda: f"Passengers:{train.passengers}")
     station_sensor  = SensorNode("Station", lambda: f"Station:{'Yes' if train.at_station else 'No'}")
-    traction_actuator = ActuatorNode("Traction", lambda msg: setattr(train, 'target_speed', float(msg.split(":")[1]) if "Speed" in msg else train.target_speed))
-    brake_actuator    = ActuatorNode("Brake", lambda msg: setattr(train, 'brakes_applied', msg == "Apply Brakes"))
-    emergency_actuator = ActuatorNode("Emerg", lambda msg: setattr(train, 'emergency_stop', msg == "Emergency Stop"))
-    door_actuators  = [ActuatorNode(f"DoorActuator{i}", lambda msg, i=i: train.doors.__setitem__(i, "Open" in msg)) for i in range(NUM_DOORS)]
-    control_unit    = ControlUnitNode("Control")
+    
+    # Fixed the actuator callbacks to ensure proper state changes
+    def set_target_speed(msg):
+        print(f"Debug: Traction received: {msg}")
+        if "Set Target Speed:" in msg:
+            train.target_speed = float(msg.split(":")[1])
+            print(f"[Traction] Setting target speed to {train.target_speed}")
+    
+    def set_brake_state(msg):
+        if msg == "Apply Brakes":
+            train.brakes_applied = True
+            print("[Brake] Brakes applied")
+        elif msg == "Release Brakes":
+            train.brakes_applied = False
+            print("[Brake] Brakes released")
+    
+    def set_emergency_state(msg):
+        if msg == "Emergency Stop":
+            train.emergency_stop = True
+            train.target_speed = 0
+            print("[Emergency] Emergency stop activated")
+    
+    def set_door_state(msg, door_idx):
+        if f"Open Door{door_idx}" in msg:
+            train.doors[door_idx] = True
+            print(f"[Door{door_idx}] Door opened")
+        elif f"Close Door{door_idx}" in msg:
+            train.doors[door_idx] = False
+            print(f"[Door{door_idx}] Door closed")
+    
+    traction_actuator = ActuatorNode("Traction", set_target_speed)
+    brake_actuator = ActuatorNode("Brake", set_brake_state)
+    emergency_actuator = ActuatorNode("Emerg", set_emergency_state)
+    door_actuators = [ActuatorNode(f"DoorActuator{i}", lambda msg, i=i: set_door_state(msg, i)) for i in range(NUM_DOORS)]
+    
+    control_unit = ControlUnitNode("Control")
 
     # All nodes in order for placement along the bus.
     nodes = [speed_sensor] + door_sensors + [passenger_sensor, station_sensor, traction_actuator, brake_actuator, emergency_actuator] + door_actuators + [control_unit]
@@ -371,38 +475,64 @@ def simulate_tcms():
             if sender_node and target_node:
                 t["start_x"] = sender_node.x
                 t["end_x"]   = target_node.x
+            # If target is not found, use control unit as default
+            elif sender_node and not target_node:
+                t["start_x"] = sender_node.x
+                t["end_x"] = control_unit.x
 
     clock = pygame.time.Clock()
     running = True
     message_timer = 0
     previous_at_station = False
     font = pygame.font.SysFont(None, 24)
+    
+    # Keep track of the station braking state
+    approaching_station = False
+    
+    # Fixed time-based movement metrics
+    last_frame_time = time.time()
 
     while running:
-        # --- Train stopping logic ---
-        if not train.at_station:
-            stopping_points = [200, 500, 800]
-            d = train.distance_traveled % 900
-            distances = [(s - d) % 900 for s in stopping_points]
-            distance_to_next_stop = min([dist for dist in distances if dist > 0])
-            u = train.speed
-            s = 0
-            speed = u
-            while speed > 0:
-                speed = max(0, speed - DECELERATION)
-                s += speed * (1 / 60) * 0.5
-            if distance_to_next_stop <= s and not control_unit.brakes_applied:
-                send_network_message(control_unit.name, "Brake", "Apply Brakes")
-                control_unit.brakes_applied = True
-                control_unit.display_message = "Automatic braking applied"
-        else:
-            if control_unit.brakes_applied:
-                send_network_message(control_unit.name, "Brake", "Release Brakes")
-                control_unit.brakes_applied = False
-                control_unit.display_message = "Brakes released at station"
-
-        delta_time = clock.tick(60) / 1000.0
         current_time = pygame.time.get_ticks() / 1000.0
+        
+        # Calculate precise delta time for smoother animation
+        now = time.time()
+        delta_time = now - last_frame_time
+        last_frame_time = now
+        
+        # Cap delta_time to avoid physics issues on slow computers
+        delta_time = min(delta_time, 0.1)
+        
+        # --- Train stopping logic (Improved) ---
+        if not train.at_station and not train.brakes_applied and not train.emergency_stop:
+            # Define station positions
+            station_positions = [0, STATION_DISTANCE, STATION_DISTANCE * 2]
+            current_pos = train.distance_traveled % (STATION_DISTANCE * 3)
+            
+            # Find distance to next station ahead
+            distances_to_stations = [(pos - current_pos) % (STATION_DISTANCE * 3) for pos in station_positions]
+            distance_to_next_stop = min([dist for dist in distances_to_stations if dist > 0], default=STATION_DISTANCE)
+            
+            # Calculate stopping distance based on current speed (simplified physics)
+            stopping_distance = (train.speed**2) / (2 * DECELERATION) * 0.5
+            
+            # Add buffer distance for safety
+            stopping_distance += 20
+            
+            # Check if we need to start braking
+            if distance_to_next_stop <= stopping_distance and train.speed > 5:
+                if not approaching_station:
+                    approaching_station = True
+                    control_unit.send_command("Brake", "Apply Brakes")
+                    control_unit.brakes_applied = True
+                    control_unit.display_message = "Approaching station, braking"
+            
+        # If we're at a station and brakes still applied, release them
+        if train.at_station and control_unit.brakes_applied and approaching_station:
+            approaching_station = False
+            control_unit.send_command("Brake", "Release Brakes")
+            control_unit.brakes_applied = False
+            control_unit.display_message = "At station, brakes released"
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -422,8 +552,9 @@ def simulate_tcms():
         station_sensor.update(current_time)
 
         # Process any received messages from the network.
-        while received_messages:
-            msg = received_messages.pop(0)
+        processed_messages = []
+        for msg in received_messages:
+            processed_messages.append(msg)
             print(f"[Simulation] Processing received message: {msg}")
             # Use the 'real_target' field to determine the intended recipient.
             intended_target = msg.get("real_target", msg.get("target"))
@@ -431,21 +562,33 @@ def simulate_tcms():
                 if hasattr(node, 'name') and node.name == intended_target:
                     node.receive_message(msg["message"])
                     break
+        
+        # Remove processed messages from the queue
+        for msg in processed_messages:
+            if msg in received_messages:
+                received_messages.remove(msg)
 
         # Update train state.
-        train.update(delta_time)
-        if train.at_station and not previous_at_station and train.speed < 1:
-            for i in range(NUM_DOORS):
-                send_network_message(control_unit.name, f"DoorActuator{i}", f"Open Door{i}")
-            control_unit.display_message = "Doors automatically opening at station"
+        train.update(delta_time, current_time)
+        
+        # Auto-open doors when arriving at station
+        if train.at_station and not previous_at_station:
+            # Only open doors if train is fully stopped
+            if train.speed < 0.1:
+                for i in range(NUM_DOORS):
+                    control_unit.send_command(f"DoorActuator{i}", f"Open Door{i}")
+                control_unit.display_message = "At station, opening doors"
+        
         if train.at_station:
             train.board_passengers()
+        
         previous_at_station = train.at_station
 
         if current_time > message_timer and control_unit.display_message:
             control_unit.display_message = ""
 
-        train_x = 50 + (train.distance_traveled % 900)
+        # Calculate train position for visualization
+        train_x = 50 + (train.distance_traveled % (STATION_DISTANCE * 3))
 
         # Update local network transmissions.
         network_bus.update_transmissions(delta_time)
@@ -453,18 +596,45 @@ def simulate_tcms():
 
         # Draw everything.
         screen.fill(WHITE)
+        
+        # Draw the bus line
+        pygame.draw.line(screen, BLACK, (50, 500), (WIDTH - 50, 500), 3)
         pygame.draw.line(screen, BLACK, (50, 600), (WIDTH - 50, 600), 5)
+        
+        # Draw stations
         for i in range(3):
-            station_x = 50 + i * 300
-            color = YELLOW if train.at_station and abs(train_x - station_x) < 10 else GRAY
+            station_x = 50 + i * STATION_DISTANCE
+            # Highlight the station yellow if train is at this station
+            is_at_this_station = train.at_station and abs(train_x - station_x) < 15
+            color = YELLOW if is_at_this_station else GRAY
             pygame.draw.rect(screen, color, (station_x - 10, 590, 20, 20))
-            screen.blit(font.render(f"Station {i+1}", True, BLACK), (station_x - 20, 610))
+            screen.blit(font.render(f"Station {i+1}", True, BLACK), (station_x - 30, 610))
+        
+        # Draw the train
         pygame.draw.rect(screen, BLACK, (train_x, 550, 200, 50))
+        
+        # Draw train doors
         door_positions = [train_x + 20 + i * 45 for i in range(4)]
         for i, pos in enumerate(door_positions):
             color = RED if train.doors[i] else GREEN
             pygame.draw.rect(screen, color, (pos, 550, 30, 50))
-        screen.blit(font.render(f"{train.speed:.1f} km/h", True, BLACK), (train_x + 50, 520))
+        
+        # Draw train speed
+        screen.blit(font.render(f"{train.speed:.1f} km/h", True, WHITE), (train_x + 50, 570))
+        
+        # Draw more info about train state for debugging
+        debug_info = [
+            f"Speed: {train.speed:.2f}",
+            f"Target: {train.target_speed:.2f}",
+            f"Brakes: {'On' if train.brakes_applied else 'Off'}",
+            f"Emerg: {'On' if train.emergency_stop else 'Off'}",
+            f"At Station: {'Yes' if train.at_station else 'No'}",
+            f"Distance: {train.distance_traveled:.2f}",
+            f"Passengers: {train.passengers}/{MAX_PASSENGERS}",
+            f"Doors: {sum(train.doors)} Open, {NUM_DOORS - sum(train.doors)} Closed"
+        ]
+        for i, text in enumerate(debug_info):
+            screen.blit(font.render(text, True, BLACK), (train_x + 50, 770 - (i+1) * 20))
 
         # Draw network bus transmissions (animated packets).
         network_bus.draw_transmissions(screen, font)
@@ -475,6 +645,9 @@ def simulate_tcms():
         control_unit.draw_interface()
 
         pygame.display.flip()
+        
+        # Cap frame rate for consistency
+        clock.tick(60)
 
     pygame.quit()
 
