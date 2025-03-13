@@ -11,8 +11,8 @@ import json
 # -----------------------------
 # Reduced packet loss probability to improve reliability
 PACKET_LOSS_PROB = 0.05
-MIN_DELAY = 0.01
-MAX_DELAY = 0.05
+MIN_DELAY = 0.1
+MAX_DELAY = 0.5
 STATION_POSITIONS = [0, 300, 500]
 
 
@@ -207,7 +207,7 @@ class Train:
         # Track the last time we tried stopping at a station
         self.last_station_stop_time = 0
         
-    def update(self, delta_time, current_time):
+    def update(self, delta_time):
          # Handle speed calculation
         wind_effect = random.uniform(-0.01, 0.01)
         
@@ -222,7 +222,6 @@ class Train:
             self.speed = max(0, self.speed - 0.01 * delta_time + wind_effect * delta_time)
         
         # Update position based on speed
-        old_distance = self.distance_traveled
         distance_change = self.speed * delta_time
         self.distance_traveled += distance_change
         
@@ -373,13 +372,13 @@ class ControlUnitNode(Node):
         elif button == "Open Doors":
             if self.current_speed < 1.0:  # Allow for small float imprecision
                 for i in range(NUM_DOORS):
-                    self.send_command(f"DoorActuator{i}", f"Open Door{i}")
+                    self.send_command(f"DoorA{i}", f"Open Door{i}")
                 self.display_message = "Opening doors"
             else:
                 self.display_message = "Cannot open doors while moving"
         elif button == "Close Doors":
             for i in range(NUM_DOORS):
-                self.send_command(f"DoorActuator{i}", f"Close Door{i}")
+                self.send_command(f"DoorA{i}", f"Close Door{i}")
             self.display_message = "Closing doors"
         elif button == "Emergency Stop":
             if self.send_command("Emerg", "Emergency Stop"):
@@ -420,7 +419,7 @@ def simulate_tcms():
 
     # Create nodes.
     speed_sensor    = SensorNode("Speed", lambda: f"Speed:{train.speed:.1f}", interval=0.5)  # More frequent updates
-    door_sensors    = [SensorNode(f"DoorSensor{i}", lambda i=i: f"Door{i}:{'Open' if train.doors[i] else 'Closed'}") for i in range(NUM_DOORS)]
+    door_sensors    = [SensorNode(f"DoorS{i}", lambda i=i: f"Door{i}:{'Open' if train.doors[i] else 'Closed'}") for i in range(NUM_DOORS)]
     passenger_sensor = SensorNode("Pass", lambda: f"Passengers:{train.passengers}")
     station_sensor  = SensorNode("Station", lambda: f"Station:{'Yes' if train.at_station else 'No'}")
     
@@ -456,7 +455,7 @@ def simulate_tcms():
     traction_actuator = ActuatorNode("Traction", set_target_speed)
     brake_actuator = ActuatorNode("Brake", set_brake_state)
     emergency_actuator = ActuatorNode("Emerg", set_emergency_state)
-    door_actuators = [ActuatorNode(f"DoorActuator{i}", lambda msg, i=i: set_door_state(msg, i)) for i in range(NUM_DOORS)]
+    door_actuators = [ActuatorNode(f"DoorA{i}", lambda msg, i=i: set_door_state(msg, i)) for i in range(NUM_DOORS)]
     
     control_unit = ControlUnitNode("Control")
 
@@ -524,6 +523,7 @@ def simulate_tcms():
             buffer = 20
             
             # Check if we need to start braking
+            print(f"DEBUG: Distance to next stop: {distance_to_next_stop:.3f}, Stopping distance: {stopping_distance:.3f}, Buffer: {buffer:.3f}")
             if distance_to_next_stop <= (stopping_distance + buffer) and train.speed > 2:
                 if not approaching_station:
                     approaching_station = True
@@ -582,14 +582,14 @@ def simulate_tcms():
                 received_messages.remove(msg)
 
         # Update train state.
-        train.update(delta_time, current_time)
+        train.update(delta_time)
         
         # Auto-open doors when arriving at station
         if train.at_station and not previous_at_station:
             # Only open doors if train is fully stopped
             if train.speed < 0.1:
                 for i in range(NUM_DOORS):
-                    control_unit.send_command(f"DoorActuator{i}", f"Open Door{i}")
+                    control_unit.send_command(f"DoorA{i}", f"Open Door{i}")
                 control_unit.display_message = "At station, opening doors"
         
         if train.at_station:
