@@ -11,8 +11,10 @@ import json
 # -----------------------------
 # Reduced packet loss probability to improve reliability
 PACKET_LOSS_PROB = 0.05
-MIN_DELAY = 0.1
-MAX_DELAY = 0.5
+MIN_DELAY = 0.01
+MAX_DELAY = 0.05
+STATION_POSITIONS = [0, 300, 500]
+
 
 # Global list to collect received network messages for processing
 received_messages = []
@@ -171,10 +173,10 @@ YELLOW  = (255, 255, 0)
 PURPLE  = (128, 0, 128)  # for control node
 
 # Train parameters and simulation constants
-CRUISING_SPEED = 80  
-ACCELERATION = 0.1  
-DECELERATION = 0.2  
-EMERGENCY_DECEL = 0.5  
+CRUISING_SPEED = 22.22  # ~80 km/h in m/s, adjust as needed
+ACCELERATION = 6.0      # m/s^2
+DECELERATION = 12.0     # m/s^2
+EMERGENCY_DECEL = 24.0  # m/s^2 
 NUM_DOORS = 4
 MAX_PASSENGERS = 200
 STATION_DISTANCE = 300
@@ -206,48 +208,49 @@ class Train:
         self.last_station_stop_time = 0
         
     def update(self, delta_time, current_time):
-        # Handle speed calculation
+         # Handle speed calculation
         wind_effect = random.uniform(-0.01, 0.01)
         
         if self.emergency_stop:
-            self.speed = max(0, self.speed - EMERGENCY_DECEL)
+            self.speed = max(0, self.speed - EMERGENCY_DECEL * delta_time)
             self.target_speed = 0
         elif self.brakes_applied:
-            self.speed = max(0, self.speed - DECELERATION)
+            self.speed = max(0, self.speed - DECELERATION * delta_time)
         elif self.speed < self.target_speed:
-            self.speed = min(self.target_speed, self.speed + ACCELERATION + wind_effect)
+            self.speed = min(self.target_speed, self.speed + ACCELERATION * delta_time + wind_effect * delta_time)
         else:
-            self.speed = max(0, self.speed - 0.01 + wind_effect)
+            self.speed = max(0, self.speed - 0.01 * delta_time + wind_effect * delta_time)
         
         # Update position based on speed
         old_distance = self.distance_traveled
-        distance_change = self.speed * delta_time * 0.5
+        distance_change = self.speed * delta_time
         self.distance_traveled += distance_change
         
         # Print detailed debug info
         print(f"DEBUG: Speed={self.speed:.2f}, Distance={self.distance_traveled:.2f}, Change={distance_change:.4f}")
         
-        # Reset position logic - only snap to station when stopped
-        stopping_points = [0, 220, 525]
+        # Define station positions
+        stopping_points = [0, 300, 500]  # Use STATION_DISTANCE for consistency
         
-        # Track wraparound for visualization only - don't modify self.distance_traveled
+        # Calculate visualized distance for display only
         visualized_distance = self.distance_traveled % (STATION_DISTANCE * 3)
         
-        # Station detection
+        # Station detection - improved logic
+        self.at_station = False
+        
         if self.speed < 0.1:  # Almost stopped
             for s in stopping_points:
                 station_distance = abs(visualized_distance - s)
-                if station_distance < 30:
-                    print(f"DEBUG: Near station at {s}, distance={station_distance:.2f}")
+                if station_distance < 20:  # Reduced threshold for better precision
                     if self.speed == 0:
-                        # Only adjust position when completely stopped
-                        print(f"DEBUG: Adjusting position to station at {s}")
-                        # DO NOT reset the total distance traveled, just ensure visualization works
-                        mod_900 = self.distance_traveled % 900
-                        offset = (s - mod_900) % 900
-                        if offset > 450:  # Take shortest path
-                            offset -= 900
-                        self.distance_traveled += offset
+                        # If we're completely stopped and close to a station, adjust position exactly
+                        print(f"DEBUG: Stopped at station {s}")
+                        # Calculate the most direct way to adjust position
+                        current_mod = self.distance_traveled % (STATION_DISTANCE * 3)
+                        if abs(current_mod - s) < 20:
+                            # Small adjustment needed
+                            self.distance_traveled += (s - current_mod)
+                        self.at_station = True
                         break
         
         # Update station status based on visualized distance
@@ -503,8 +506,7 @@ def simulate_tcms():
         # Cap delta_time to avoid physics issues on slow computers
         delta_time = min(delta_time, 0.1)
         
-        # --- Train stopping logic (Improved) ---
-        if not train.at_station and not train.brakes_applied and not train.emergency_stop:
+        if not train.at_station and not train.emergency_stop:
             # Define station positions
             station_positions = [0, STATION_DISTANCE, STATION_DISTANCE * 2]
             current_pos = train.distance_traveled % (STATION_DISTANCE * 3)
@@ -513,20 +515,31 @@ def simulate_tcms():
             distances_to_stations = [(pos - current_pos) % (STATION_DISTANCE * 3) for pos in station_positions]
             distance_to_next_stop = min([dist for dist in distances_to_stations if dist > 0], default=STATION_DISTANCE)
             
-            # Calculate stopping distance based on current speed (simplified physics)
-            stopping_distance = (train.speed**2) / (2 * DECELERATION) * 0.5
-            
+            # Calculate stopping distance based on current speed (improved physics)
+            # More accurate stopping distance calculation
+            stopping_distance = (train.speed ** 2) / (2 * DECELERATION)
+            print(f"DEBUG: Position: {train.distance_traveled:.3f}, Speed: {train.speed:.3f}, Distance to next stop: {distance_to_next_stop:.3f}, Approaching: {approaching_station}")
+
             # Add buffer distance for safety
-            stopping_distance += 20
+            buffer = 20
             
             # Check if we need to start braking
-            if distance_to_next_stop <= stopping_distance and train.speed > 5:
+            if distance_to_next_stop <= (stopping_distance + buffer) and train.speed > 2:
                 if not approaching_station:
                     approaching_station = True
                     control_unit.send_command("Brake", "Apply Brakes")
                     control_unit.brakes_applied = True
-                    control_unit.display_message = "Approaching station, braking"
-            
+                    control_unit.display_message = f"Approaching station, braking. Distance: {distance_to_next_stop:.1f}"
+                    print(f"DEBUG: Starting to brake. Distance to station: {distance_to_next_stop:.1f}, Stopping distance: {stopping_distance:.1f}")
+            elif distance_to_next_stop < 10 and train.speed < 5:
+                # When very close to station and moving slowly, come to a complete stop
+                train.speed = 0
+                train.target_speed = 0
+                control_unit.send_command("Brake", "Release Brakes")
+                approaching_station = False
+                control_unit.display_message = "Arrived at station"
+                print(f"DEBUG: Arrived at station")
+
         # If we're at a station and brakes still applied, release them
         if train.at_station and control_unit.brakes_applied and approaching_station:
             approaching_station = False
