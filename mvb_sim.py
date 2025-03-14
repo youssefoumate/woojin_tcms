@@ -200,6 +200,10 @@ class Train:
         self.at_station = False
         self.station_stop_time = None  # Timestamp when the train first came to a near-stop at a station
         self.DWELL_TIME = 1  # seconds to consider the train "at station"
+        # Add new leaving_station flag and timer
+        self.leaving_station = False
+        self.leaving_station_time = None
+        self.LEAVING_COOLDOWN = 5.0  # seconds before train can detect a station again after leaving
 
     def update(self, delta_time):
         # Update speed based on control flags.
@@ -209,6 +213,11 @@ class Train:
             self.target_speed = 0
         elif self.brakes_applied:
             self.speed = max(0, self.speed - 12.0 * delta_time)
+        elif self.at_station:
+            # When at a station, keep the train stopped regardless of target speed
+            # unless explicitly told to leave (which will set leaving_station flag)
+            self.speed = 0
+            self.target_speed = 0  # Ensure target_speed is also 0
         elif self.speed < self.target_speed:
             self.speed = min(self.target_speed, self.speed + 6.0 * delta_time + wind_effect * delta_time)
         else:
@@ -237,26 +246,39 @@ class Train:
                 nearest_distance = d
                 nearest_station = s
 
+        # Check if we need to clear the leaving_station flag
+        if self.leaving_station:
+            if time.time() - self.leaving_station_time >= self.LEAVING_COOLDOWN:
+                self.leaving_station = False
+                print("[Train] No longer in leaving_station state")
+        
+        # Set the leaving_station flag when we start moving away from a station
+        if self.at_station and self.speed > 0.1:
+            self.at_station = False
+            self.leaving_station = True
+            self.leaving_station_time = time.time()
+            self.station_stop_time = None
+            print("[Train] Leaving station, setting cooldown")
+
         # Station detection:
-        # Only flag as "at_station" if within 5 pixels and nearly stopped.
-        if nearest_distance < 5 and self.speed < 0.1:
+        # Only flag as "at_station" if within 5 pixels and nearly stopped, and not in leaving_station mode
+        if nearest_distance < 50 and self.speed < 0.1 and not self.leaving_station:
             if self.station_stop_time is None:
                 self.station_stop_time = time.time()  # Record the time when station was reached
             # Keep at_station True if we've been dwelling for at least DWELL_TIME.
             if time.time() - self.station_stop_time >= self.DWELL_TIME:
                 self.at_station = True
+                self.target_speed = 0
         else:
-            # If the train is moving or it has left the immediate station zone, clear the flag.
-            # Using a 10 pixel threshold to clear the flag.
-            if nearest_distance > 50:
+            # If the train is moving or it has left the immediate station zone and not in leaving mode, clear the flag.
+            # Using a 10 pixel threshold to clear the flag, but only if not in leaving_station state.
+            if nearest_distance > 50 and not self.leaving_station:
                 self.at_station = False
                 self.station_stop_time = None
-
     def board_passengers(self):
-        if self.at_station and any(self.doors):
-            boarding = random.randint(0, 10)
-            alighting = random.randint(0, min(10, self.passengers))
-            self.passengers = max(0, min(MAX_PASSENGERS, self.passengers + boarding - alighting))
+        self.passengers += 1
+        if self.passengers > MAX_PASSENGERS:
+            self.passengers = MAX_PASSENGERS
 
 # Base Node class
 class Node:
@@ -351,6 +373,12 @@ class ControlUnitNode:
                 if self.send_command("Traction", f"Set Target Speed:{CRUISING_SPEED}"):
                     self.display_message = "Train starting..."
                     self.approaching_station = False  # Reset auto-braking flag
+                    # Clear at_station flag and set leaving_station flag
+                    if train.at_station:
+                        train.at_station = False
+                        train.leaving_station = True
+                        train.leaving_station_time = time.time()
+                        print("[Control] Manually leaving station, setting cooldown")
             else:
                 self.display_message = "Cannot start with doors open"
         elif button == "Apply Brakes":
@@ -364,6 +392,11 @@ class ControlUnitNode:
                 self.display_message = "Brakes released"
                 # Reset the auto-braking flag so that subsequent station approach logic can work correctly
                 self.approaching_station = False
+                
+                # If at a station, ensure the target speed stays at 0
+                if train.at_station:
+                    if self.send_command("Traction", "Set Target Speed:0"):
+                        self.display_message = "Brakes released, train holding at station"
         elif button == "Open Doors":
             if self.current_speed < 1.0:
                 for i in range(NUM_DOORS):
@@ -429,6 +462,7 @@ def simulate_tcms():
             train.brakes_applied = True
             print("[Brake] Brakes applied")
         elif msg == "Release Brakes":
+            train.leaving_station = True
             train.brakes_applied = False
             print("[Brake] Brakes released")
     
@@ -502,7 +536,7 @@ def simulate_tcms():
         # -----------------------------
         # Automatic Station Approach Logic
         # -----------------------------
-        if not train.at_station and not train.emergency_stop:
+        if not train.at_station and not train.emergency_stop and not train.leaving_station:  # Add check for leaving_station
             station_positions = [0, STATION_DISTANCE, STATION_DISTANCE * 2]
             current_pos = train.distance_traveled % (STATION_DISTANCE * 3)
             distances_to_stations = [(pos - current_pos) % (STATION_DISTANCE * 3) for pos in station_positions]
@@ -511,31 +545,25 @@ def simulate_tcms():
             buffer = 20  # safety buffer
             
             print(f"DEBUG: Pos: {train.distance_traveled:.3f}, Speed: {train.speed:.3f}, "
-                  f"Distance to next: {distance_to_next_stop:.3f}, Stopping distance: {stopping_distance:.3f}")
+                f"Distance to next: {distance_to_next_stop:.3f}, Stopping distance: {stopping_distance:.3f}")
 
             # Automatic braking logic
-            if distance_to_next_stop <= (stopping_distance + 20) and train.speed > 2:
+            if distance_to_next_stop <= (stopping_distance + buffer) and train.speed > 2:
                 if not control_unit.approaching_station:
                     control_unit.approaching_station = True
                     control_unit.send_command("Brake", "Apply Brakes")
                     control_unit.brakes_applied = True
                     control_unit.display_message = f"Approaching station, braking. Distance: {distance_to_next_stop:.1f}"
                     print(f"DEBUG: Starting to brake. Distance: {distance_to_next_stop:.1f}")
-            elif distance_to_next_stop < 10 and train.speed < 5:
+            if distance_to_next_stop < 10 and train.speed < 5:
                 # Arrived at station – stop completely.
                 train.speed = 0
                 train.target_speed = 0
-                control_unit.send_command("Brake", "Release Brakes")
+                # Also explicitly set the target speed via the traction system
+                control_unit.send_command("Traction", "Set Target Speed:0")
                 control_unit.approaching_station = False
                 control_unit.display_message = "Arrived at station"
                 print("DEBUG: Arrived at station")
-                
-        # Ensure that if the train is at station and brakes remain applied, release them.
-        if train.at_station and control_unit.brakes_applied and control_unit.approaching_station:
-            control_unit.approaching_station = False
-            control_unit.send_command("Brake", "Release Brakes")
-            control_unit.brakes_applied = False
-            control_unit.display_message = "At station, brakes released"
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -608,14 +636,12 @@ def simulate_tcms():
             f"Brakes: {'On' if train.brakes_applied else 'Off'}",
             f"Emerg: {'On' if train.emergency_stop else 'Off'}",
             f"At Station: {'Yes' if train.at_station else 'No'}",
+            f"Leaving Station: {'Yes' if train.leaving_station else 'No'}",  # Add this line
             f"Distance: {train.distance_traveled:.2f}",
             f"Passengers: {train.passengers}/{MAX_PASSENGERS}",
             f"Doors: {sum(train.doors)} Open, {NUM_DOORS - sum(train.doors)} Closed"
         ]
-        for i, text in enumerate(debug_info := [
-            f"Speed: {train.speed:.2f}",
-            f"Distance: {train.distance_traveled:.2f}"
-        ]):
+        for i, text in enumerate(debug_info):
             screen.blit(font.render(text, True, BLACK), (train_x + 50, 770 - (i+1) * 20))
 
         network_bus.update_transmissions(delta_time)
