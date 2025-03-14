@@ -69,6 +69,7 @@ class ControlUnitNode(Node):
         self.display_message = ""
         self.last_commands = {}
         self.approaching_station = False
+        self.emergency_stops_count = 0
 
     def receive_message(self, message):
         """Updates control unit state based on received messages."""
@@ -117,9 +118,13 @@ class ControlUnitNode(Node):
                 self.brakes_applied = False
                 self.display_message = "Brakes released"
                 self.approaching_station = False
-                if train.at_station:
-                    if self.send_command("Traction", "Set Target Speed:0", send_message_func):
-                        self.display_message = "Brakes released, train holding at station"
+                if self.send_command("Traction", "Set Target Speed:0", send_message_func):
+                    if train.at_station:
+                            self.display_message = "Brakes released, train holding at station"
+                    elif train.emergency_stop:
+                        self.display_message = "Brakes released, train in emergency stop"
+                    else:
+                        self.display_message = "Brakes released, train moving"
         elif button == "Open Doors":
             if self.current_speed < 1.0:
                 for i in range(NUM_DOORS):
@@ -132,7 +137,8 @@ class ControlUnitNode(Node):
                 self.send_command(f"DoorActuator{i}", f"Close Door{i}", send_message_func)
             self.display_message = "Closing doors"
         elif button == "Emergency Stop":
-            if self.send_command("Emerg", "Emergency Stop", send_message_func):
+            self.emergency_stops_count += 1
+            if self.send_command("Emerg", f"Emergency Stop {self.emergency_stops_count}", send_message_func):
                 self.emergency_stop = True
                 self.display_message = "EMERGENCY STOP ACTIVATED"
 

@@ -13,6 +13,7 @@ from constants import RED, BLACK
 PACKET_LOSS_PROB = 0.05
 MIN_DELAY = 0.1
 MAX_DELAY = 0.5
+net_debug = False
 
 class NetworkMVB_Bus:
     """Manages network communication for the TCMS simulation."""
@@ -29,9 +30,11 @@ class NetworkMVB_Bus:
         try:
             self.websocket = await websockets.connect(self.uri)
             await self.websocket.send(json.dumps({"register": self.node_name}))
-            print(f"[Network Bus] {self.node_name} connected to network bus.")
+            if net_debug:
+                print(f"[Network Bus] {self.node_name} connected to network bus.")
         except Exception as e:
-            print(f"[Network Bus] Connection error: {e}")
+            if net_debug:
+                print(f"[Network Bus] Connection error: {e}")
             self.websocket = None
 
     async def send_message(self, sender, target, message, real_target=None):
@@ -39,7 +42,8 @@ class NetworkMVB_Bus:
         if self.websocket is None:
             await self.connect()
         if self.websocket is None:
-            print("[Network Bus] Unable to connect; message not sent.")
+            if net_debug:
+                print("[Network Bus] Unable to connect; message not sent.")
             return
 
         effective_target = real_target if real_target is not None else target
@@ -55,15 +59,19 @@ class NetworkMVB_Bus:
             self.received_messages.put(data.copy())
 
         if random.random() < PACKET_LOSS_PROB:
-            print(f"[Network Bus] Packet lost locally: {data}")
+            if net_debug:
+                print(f"[Network Bus] Packet lost locally: {data}")
             return
 
         delay = random.uniform(MIN_DELAY, MAX_DELAY)
-        print(f"[Network Bus] Delaying packet {data} by {delay:.2f} sec.")
+        if net_debug:
+            print(f"[Network Bus] Delaying packet {data} by {delay:.2f} sec.")
         await asyncio.sleep(delay)
         try:
             await self.websocket.send(json.dumps(data))
-            print(f"[Network Bus] Sent message: {data}")
+
+            if net_debug:
+                print(f"[Network Bus] Sent message: {data}")
             self.transmissions.append({
                 "sender": sender,
                 "target": effective_target,
@@ -73,7 +81,8 @@ class NetworkMVB_Bus:
                 "end_x": None
             })
         except websockets.ConnectionClosed:
-            print("[Network Bus] Connection closed while sending message.")
+            if net_debug:
+                print("[Network Bus] Connection closed while sending message.")
             self.websocket = None
 
     async def receive_message(self):
@@ -85,10 +94,12 @@ class NetworkMVB_Bus:
         try:
             message = await self.websocket.recv()
             data = json.loads(message)
-            print(f"[Network Bus] Received message: {data}")
+            if net_debug:
+                print(f"[Network Bus] Received message: {data}")
             return data
         except websockets.ConnectionClosed:
-            print("[Network Bus] Connection closed during recv().")
+            if net_debug:
+                print("[Network Bus] Connection closed during recv().")
             self.websocket = None
             return None
 
@@ -99,7 +110,8 @@ class NetworkMVB_Bus:
             if msg:
                 self.received_messages.put(msg)
             else:
-                print("[Network Bus] Attempting to reconnect...")
+                if net_debug:
+                    print("[Network Bus] Attempting to reconnect...")
                 await asyncio.sleep(1)
                 await self.connect()
 
@@ -109,7 +121,8 @@ class NetworkMVB_Bus:
         for t in self.transmissions[:]:
             t["progress"] += delta_time / TRANSMISSION_TIME
             if t["progress"] >= 1.0:
-                print(f"[Network Bus] Transmission complete: {t}")
+                if net_debug:
+                    print(f"[Network Bus] Transmission complete: {t}")
                 self.transmissions.remove(t)
 
     def draw_transmissions(self, screen, font):

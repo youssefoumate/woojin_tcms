@@ -3,7 +3,7 @@
 
 import random
 import time
-from constants import NUM_DOORS, MAX_PASSENGERS, STATION_DISTANCE
+from constants import CRUISING_SPEED, NUM_DOORS, MAX_PASSENGERS, STATION_DISTANCE
 
 class Train:
     """Represents the train with its state and movement logic."""
@@ -29,6 +29,8 @@ class Train:
         if self.emergency_stop:
             self.speed = max(0, self.speed - 24.0 * delta_time)
             self.target_speed = 0
+            if self.speed == 0.0:
+                self.emergency_stop = False
         elif self.brakes_applied:
             self.speed = max(0, self.speed - 12.0 * delta_time)
         elif self.at_station:
