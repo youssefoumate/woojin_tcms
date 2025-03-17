@@ -3,7 +3,7 @@
 
 import random
 import time
-from constants import CRUISING_SPEED, NUM_DOORS, MAX_PASSENGERS, STATION_DISTANCE
+from constants import NUM_DOORS, MAX_PASSENGERS, STATION_DISTANCE
 
 class Train:
     """Represents the train with its state and movement logic."""
