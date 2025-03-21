@@ -8,33 +8,58 @@ import time
 import websockets
 import queue
 import pygame
+import logging
 from constants import RED, BLACK
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Default configuration
 PACKET_LOSS_PROB = 0.05
 MIN_DELAY = 0.1
 MAX_DELAY = 0.5
-net_debug = False
 
 class NetworkMVB_Bus:
     """Manages network communication for the TCMS simulation."""
     
-    def __init__(self, node_name, uri="ws://localhost:8765"):
+    def __init__(self, node_name, uri="ws://localhost:8765", debug_level="DEBUG"):
         self.node_name = node_name
         self.uri = uri
         self.websocket = None
         self.transmissions = []  # For message animation
         self.received_messages = queue.Queue()  # Thread-safe queue for received messages
+        
+        # Setup logger for this instance
+        self.logger = logging.getLogger(f"NetworkBus.{node_name}")
+        self.set_debug_level(debug_level)
 
+    def set_debug_level(self, level):
+        """Set the debug level for this instance."""
+        level_map = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+            "OFF": logging.CRITICAL + 10  # Higher than any standard level
+        }
+        
+        numeric_level = level_map.get(level.upper(), logging.INFO)
+        self.logger.setLevel(numeric_level)
+        self.debug_enabled = numeric_level <= logging.DEBUG
+        
     async def connect(self):
         """Establishes a websocket connection to the server."""
         try:
             self.websocket = await websockets.connect(self.uri)
             await self.websocket.send(json.dumps({"register": self.node_name}))
-            if net_debug:
-                print(f"[Network Bus] {self.node_name} connected to network bus.")
+            self.logger.info(f"Connected to network bus at {self.uri}")
         except Exception as e:
-            if net_debug:
-                print(f"[Network Bus] Connection error: {e}")
+            self.logger.error(f"Connection error: {e}")
             self.websocket = None
 
     async def send_message(self, sender, target, message, real_target=None):
@@ -42,8 +67,7 @@ class NetworkMVB_Bus:
         if self.websocket is None:
             await self.connect()
         if self.websocket is None:
-            if net_debug:
-                print("[Network Bus] Unable to connect; message not sent.")
+            self.logger.warning("Unable to connect; message not sent.")
             return
 
         effective_target = real_target if real_target is not None else target
@@ -59,19 +83,16 @@ class NetworkMVB_Bus:
             self.received_messages.put(data.copy())
 
         if random.random() < PACKET_LOSS_PROB:
-            if net_debug:
-                print(f"[Network Bus] Packet lost locally: {data}")
+            self.logger.debug(f"Packet lost: {data}")
             return
 
         delay = random.uniform(MIN_DELAY, MAX_DELAY)
-        if net_debug:
-            print(f"[Network Bus] Delaying packet {data} by {delay:.2f} sec.")
+        self.logger.debug(f"Delaying packet to {effective_target} by {delay:.2f} sec: {message}")
         await asyncio.sleep(delay)
         try:
             await self.websocket.send(json.dumps(data))
 
-            if net_debug:
-                print(f"[Network Bus] Sent message: {data}")
+            self.logger.debug(f"Sent: {sender} → {effective_target}: {message}")
             self.transmissions.append({
                 "sender": sender,
                 "target": effective_target,
@@ -81,8 +102,7 @@ class NetworkMVB_Bus:
                 "end_x": None
             })
         except websockets.ConnectionClosed:
-            if net_debug:
-                print("[Network Bus] Connection closed while sending message.")
+            self.logger.warning("Connection closed while sending message.")
             self.websocket = None
 
     async def receive_message(self):
@@ -94,12 +114,10 @@ class NetworkMVB_Bus:
         try:
             message = await self.websocket.recv()
             data = json.loads(message)
-            if net_debug:
-                print(f"[Network Bus] Received message: {data}")
+            self.logger.debug(f"Received: {data.get('sender', 'unknown')} → {data.get('real_target', data.get('target', 'unknown'))}: {data.get('message', '')}")
             return data
         except websockets.ConnectionClosed:
-            if net_debug:
-                print("[Network Bus] Connection closed during recv().")
+            self.logger.warning("Connection closed during recv().")
             self.websocket = None
             return None
 
@@ -110,8 +128,7 @@ class NetworkMVB_Bus:
             if msg:
                 self.received_messages.put(msg)
             else:
-                if net_debug:
-                    print("[Network Bus] Attempting to reconnect...")
+                self.logger.info("Attempting to reconnect...")
                 await asyncio.sleep(1)
                 await self.connect()
 
@@ -121,8 +138,7 @@ class NetworkMVB_Bus:
         for t in self.transmissions[:]:
             t["progress"] += delta_time / TRANSMISSION_TIME
             if t["progress"] >= 1.0:
-                if net_debug:
-                    print(f"[Network Bus] Transmission complete: {t}")
+                self.logger.debug(f"Transmission complete: {t['sender']} → {t['target']}: {t['message']}")
                 self.transmissions.remove(t)
 
     def draw_transmissions(self, screen, font):
